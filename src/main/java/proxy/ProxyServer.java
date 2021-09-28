@@ -8,18 +8,15 @@ import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.Set;
-
 
 public class ProxyServer {
     private final int BufferSize = 100;
-    private final String DnsServer = "8.8.8.8";
-    private final int DnsPort = 53;
 
     private int srcPort;
     private ServerSocketChannel serverSocket;
     private Selector selector;
-    private DatagramChannel udpDnsResolver;
+
+    private DnsResolver dnsResolver;
 
     private ArrayList<ConnectionTunnel> tunnels;
 
@@ -33,20 +30,16 @@ public class ProxyServer {
             serverSocket = ServerSocketChannel.open();
             serverSocket.bind(new InetSocketAddress("localhost", srcPort));
 
-            udpDnsResolver = createUdpResolver(DnsServer);
+            dnsResolver = new DnsResolver();
 
-            udpDnsResolver.configureBlocking(false);
+            dnsResolver.getChannel().configureBlocking(false);
             serverSocket.configureBlocking(false);
 
             serverSocket.register(selector, SelectionKey.OP_ACCEPT);
-            udpDnsResolver.register(selector, SelectionKey.OP_READ);
+            dnsResolver.getChannel().register(selector, SelectionKey.OP_READ);
         } catch (IOException exception) {
             System.out.println("can't create socket");
         }
-    }
-
-    private DatagramChannel createUdpResolver(String dnsServer) throws IOException {
-        return DatagramChannel.open().connect(new InetSocketAddress(dnsServer, DnsPort));
     }
 
     public void run() throws IOException {
@@ -69,7 +62,6 @@ public class ProxyServer {
 
                 if (key.isReadable())
                     resendData(key);
-
             }
         }
     }
