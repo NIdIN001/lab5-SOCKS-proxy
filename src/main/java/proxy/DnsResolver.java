@@ -1,7 +1,6 @@
 package proxy;
 
 import java.io.IOException;
-import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
@@ -15,17 +14,16 @@ import org.xbill.DNS.Record;
 
 public class DnsResolver {
     private final String IPV4_PATTERN = "((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])";
+    private final String REQUEST_ID_PATTERN = "id: \\d+";
 
     private final int BufferSize = 1024;
-    private String DnsServer;
-    private final int DnsPort = 53;
 
     private DatagramChannel udpDnsResolver;
 
-    public DnsResolver() throws IOException, DnsNotFoundException {
+    public DnsResolver(boolean isBlocking) throws IOException, DnsNotFoundException {
         try {
             udpDnsResolver = createUdpResolver(findDnsServer());
-            //udpDnsResolver.configureBlocking(false);
+            udpDnsResolver.configureBlocking(isBlocking);
         } catch (IOException | DnsNotFoundException exception) {
             System.out.println("Can't create DNS resolver");
             throw exception;
@@ -36,19 +34,41 @@ public class DnsResolver {
         return udpDnsResolver;
     }
 
-    public ArrayList<String> resolve(String addr) throws IOException {
+    public int asyncResolveRequest(String addr) throws IOException {
         Record queryRecord = Record.newRecord(Name.fromString(addr + "."), Type.A, DClass.IN);
         Message queryMessage = Message.newQuery(queryRecord);
-        return resolve(queryMessage);
+        System.out.println(queryMessage);
+        return asyncResolveRequest(queryMessage);
     }
 
-    public ArrayList<String> resolve(Message msg) throws IOException {
+    public AsyncDnsResolverAnswer asyncResolveResponse() throws IOException {
+        byte[] recvBuffer = new byte[BufferSize];
+        udpDnsResolver.read(ByteBuffer.wrap(recvBuffer));
+        AsyncDnsResolverAnswer answer = new AsyncDnsResolverAnswer();
+
+        Message response = new Message(recvBuffer);
+        answer.requestId = findRequestId(response);
+        answer.ipAddress = parseDnsResponse(response);
+        return answer;
+    }
+
+    public int asyncResolveRequest(Message msg) throws IOException {
+        udpDnsResolver.write(ByteBuffer.wrap(msg.toWire()));
+        return findRequestId(msg);
+    }
+
+    public ArrayList<String> syncResolve(String addr) throws IOException {
+        Record queryRecord = Record.newRecord(Name.fromString(addr + "."), Type.A, DClass.IN);
+        Message queryMessage = Message.newQuery(queryRecord);
+        return syncResolve(queryMessage);
+    }
+
+    public ArrayList<String> syncResolve(Message msg) throws IOException {
         udpDnsResolver.write(ByteBuffer.wrap(msg.toWire()));
 
         byte[] recvBuffer = new byte[BufferSize];
         udpDnsResolver.read(ByteBuffer.wrap(recvBuffer));
         Message response = new Message(recvBuffer);
-
         return parseDnsResponse(response);
     }
 
@@ -63,6 +83,16 @@ public class DnsResolver {
         }
 
         return listMatches;
+    }
+
+    private int findRequestId(Message msg) {
+        Pattern idPattern = Pattern.compile(REQUEST_ID_PATTERN);
+        Matcher matcher = idPattern.matcher(msg.toString());
+
+        if (matcher.find())
+            return Integer.parseInt(matcher.group().substring(4));
+        else
+            throw new NumberFormatException();
     }
 
     private DatagramChannel createUdpResolver(InetSocketAddress dnsServer) throws IOException {
