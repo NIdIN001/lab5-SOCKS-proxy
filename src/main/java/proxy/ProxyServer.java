@@ -37,7 +37,7 @@ public class ProxyServer {
 
             serverSocket.register(selector, SelectionKey.OP_ACCEPT);
             dnsResolver.getChannel().register(selector, SelectionKey.OP_READ);
-        } catch (IOException exception) {
+        } catch (IOException | DnsNotFoundException exception) {
             System.out.println("can't create socket");
         }
     }
