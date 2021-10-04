@@ -79,7 +79,6 @@ public class ConnectionTunnel {
         return dnsRequestId;
     }
 
-    //todo обратобка разного рода ошибок а также закрытия сокета
     public void setDestServer(AsyncDnsResolverAnswer answer) throws IOException {
         if (isWaitingDnsResponse) {
             createDestServerSocket(getAsyncDnsResponse(answer));
@@ -91,10 +90,7 @@ public class ConnectionTunnel {
             ByteBuffer recvBuffer = ByteBuffer.allocate(BufferSize);
             int read = client.read(recvBuffer);
             if (read == -1) {
-                System.out.println("remove: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort());
-                client.close();
-                client.keyFor(serverSelector).cancel();
-                proxyServer.removeConnection(this);
+                throw new IOException();
             }
 
             if (stepOfAuthentication == 0 & isCorrectFirstGreeting(recvBuffer)) {
@@ -205,7 +201,6 @@ public class ConnectionTunnel {
         ByteBuffer url = ByteBuffer.allocate(urlLength);
         System.arraycopy(recvBuffer.array(), 5, url.array(), 0, urlLength);
 
-        System.out.println("REQUEST TO:" + new String(url.array()));
 
         destPort = recvBuffer.getShort(5 + urlLength);
         ByteBuffer destResourceBytes = ByteBuffer.allocate(recvBuffer.get(4) + 1);
