@@ -18,16 +18,11 @@ public class DnsResolver {
 
     private final int BufferSize = 1024;
 
-    private DatagramChannel udpDnsResolver;
+    private final DatagramChannel udpDnsResolver;
 
-    public DnsResolver(boolean isBlocking) throws IOException, DnsNotFoundException {
-        try {
-            udpDnsResolver = createUdpResolver(findDnsServer());
-            udpDnsResolver.configureBlocking(isBlocking);
-        } catch (IOException | DnsNotFoundException exception) {
-            System.out.println("Can't create DNS resolver");
-            throw exception;
-        }
+    public DnsResolver(boolean isBlocking) throws DnsNotFoundException, IOException {
+        udpDnsResolver = createUdpResolver(findDnsServer());
+        udpDnsResolver.configureBlocking(isBlocking);
     }
 
     public DatagramChannel getChannel() {
@@ -37,7 +32,6 @@ public class DnsResolver {
     public int asyncResolveRequest(String addr) throws IOException {
         Record queryRecord = Record.newRecord(Name.fromString(addr + "."), Type.A, DClass.IN);
         Message queryMessage = Message.newQuery(queryRecord);
-        System.out.println(queryMessage);
         return asyncResolveRequest(queryMessage);
     }
 

@@ -19,13 +19,11 @@ public class Application {
             server.run();
         } catch (NumberFormatException exception) {
             System.out.println("Port must be an integer value");
-            exception.printStackTrace();
         } catch (IOException exception) {
             System.out.println("Socket error");
             exception.printStackTrace();
-        } catch (ProxyServerException e) {
-            System.out.println("read socket error");
-            e.printStackTrace();
+        } catch (ProxyServerException exception) {
+            System.out.println("can't startup server");
         }
     }
 }

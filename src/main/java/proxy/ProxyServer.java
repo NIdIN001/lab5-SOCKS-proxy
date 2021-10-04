@@ -18,7 +18,7 @@ public class ProxyServer {
     private DnsResolver dnsResolver;
     private ArrayList<ConnectionTunnel> tunnels;
 
-    public ProxyServer(int srcPort_) {
+    public ProxyServer(int srcPort_) throws ProxyServerException {
         srcPort = srcPort_;
         tunnels = new ArrayList<>();
 
@@ -34,21 +34,24 @@ public class ProxyServer {
             serverSocket.register(selector, SelectionKey.OP_ACCEPT);
             dnsResolver.getChannel().register(selector, SelectionKey.OP_READ);
         } catch (IOException | DnsNotFoundException exception) {
-            System.out.println("can't create socket");
+            throw new ProxyServerException();
         }
+    }
+
+    public Selector getSelector() {
+        return selector;
     }
 
     public void run() throws IOException, ProxyServerException {
         System.out.println("Proxy server up on:");
         System.out.println(serverSocket.socket().getInetAddress().getHostAddress() + ":" + serverSocket.socket().getLocalPort());
+        logger.info("Proxy server up on:");
+        logger.info(serverSocket.socket().getInetAddress().getHostAddress() + ":" + serverSocket.socket().getLocalPort());
 
         while (true) {
             if (selector.select() == 0) {
                 continue;
             }
-
-            System.out.println("new event");
-            //logger.info("new event");
 
             Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
 
@@ -62,56 +65,60 @@ public class ProxyServer {
                 if (key.isReadable() & (dnsResolver.getChannel() == key.channel())) {
                     //случился resolve dns для какого-то соединения
                     AsyncDnsResolverAnswer answer = dnsResolver.asyncResolveResponse();
-                    System.out.println("new dns answer: id" + answer.requestId + " ip: " + answer.ipAddress.get(0));
-                    logger.info("new dns answer: id" + answer.requestId + " ip: " + answer.ipAddress.get(0));
+                    System.out.println("new dns answer: id " + answer.requestId + " ip: " + answer.ipAddress.get(0));
+                    logger.info("new dns answer: id " + answer.requestId + " ip: " + answer.ipAddress.get(0));
 
                     for (ConnectionTunnel tunnel : tunnels) {
                         if (tunnel.getDnsRequestId() == answer.requestId) {
                             tunnel.setDestServer(answer);
+                            break;
                         }
                     }
-                    break;
+                    continue;
                 }
 
                 if (key.isAcceptable()) {
                     acceptConnection();
-                    System.out.println("new connection");
-                    //logger.info("new connection");
-                    break;
+                    continue;
                 }
-                if (key.isReadable()){
+                if (key.isReadable()) {
                     processClient(key);
-                    //System.out.println("new readable socket");
-                    //logger.info("new readable socket");
-                    break;
+                    continue;
                 }
             }
         }
     }
 
-    private void acceptConnection() throws IOException {
-        SocketChannel client = serverSocket.accept();
-        client.configureBlocking(false);
-        client.register(selector, SelectionKey.OP_READ);
-        ConnectionTunnel tunnel = new ConnectionTunnel(selector, dnsResolver);
-        tunnel.setClient(client);
-        tunnels.add(tunnel);
+    private void acceptConnection() {
+        try {
+            SocketChannel client = serverSocket.accept();
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
+            ConnectionTunnel tunnel = new ConnectionTunnel(this, dnsResolver, client);
+            tunnels.add(tunnel);
+        } catch (IOException exception) {
+            System.out.println("can't accept new connection");
+            logger.error("can't accept new connection");
+        }
     }
 
-    private void processClient(SelectionKey key) throws IOException, ProxyServerException {
+    private void processClient(SelectionKey key) throws IOException {
         SocketChannel channel = (SocketChannel) key.channel();
         ConnectionTunnel tunnel = findTunnelBySocketChannel(channel);
 
-        System.out.println("read from socket: " + ((SocketChannel) key.channel()).socket().getInetAddress().getHostName() + ":" + ((SocketChannel) key.channel()).socket().getPort());
         if (tunnel.isConfigured())
             tunnel.resendData(channel);
         else
             tunnel.configureConnection();
     }
 
+    public void removeConnection(ConnectionTunnel tunnel) {
+        tunnels.remove(tunnel);
+    }
+
     private ConnectionTunnel findTunnelBySocketChannel(SocketChannel socket) {
         for (ConnectionTunnel tunnel : tunnels) {
-            if (tunnel.getClient().equals(socket)) // || tunnel.getDestServer().equals(socket))
+            if (tunnel.getClient().equals(socket))
                 return tunnel;
 
             if (tunnel.getDestServer() != null && tunnel.getDestServer().equals(socket))

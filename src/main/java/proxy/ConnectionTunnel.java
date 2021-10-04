@@ -1,5 +1,8 @@
 package proxy;
 
+import org.apache.log4j.LogManager;
+import org.apache.log4j.Logger;
+
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -11,13 +14,16 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 
 public class ConnectionTunnel {
-    private int BufferSize = 4096;
+    private final static Logger logger = LogManager.getLogger(ConnectionTunnel.class);
+
+    private final int BufferSize = 4096;
 
     private SocketChannel client;
     private SocketChannel destServer;
 
     private Selector serverSelector;
     private DnsResolver dnsResolver;
+    private ProxyServer proxyServer;
 
     private int dnsRequestId;
     private boolean isConfigured;
@@ -28,22 +34,29 @@ public class ConnectionTunnel {
     private String destResource;
     private int destPort;
 
-    public ConnectionTunnel(Selector selector, DnsResolver dnsResolver) {
-        serverSelector = selector;
+    public ConnectionTunnel(ProxyServer proxyServer, DnsResolver dnsResolver) {
+        serverSelector = proxyServer.getSelector();
         this.dnsResolver = dnsResolver;
-        client = null;
-        destServer = null;
+        this.proxyServer = proxyServer;
+        dnsRequestId = -1;
         isConfigured = false;
         isWaitingDnsResponse = false;
         stepOfAuthentication = 0;
-        dnsRequestId = -1;
     }
 
-    public ConnectionTunnel(SocketChannel client, SocketChannel destServer, Selector selector, DnsResolver dnsResolver) {
+    public ConnectionTunnel(ProxyServer proxyServer, DnsResolver dnsResolver, SocketChannel client) {
+        this(proxyServer, dnsResolver);
+        this.client = client;
+    }
+
+    public ConnectionTunnel(SocketChannel client, SocketChannel destServer, ProxyServer proxyServer, DnsResolver dnsResolver) {
         this.client = client;
         this.destServer = destServer;
         this.dnsResolver = dnsResolver;
-        serverSelector = selector;
+        this.proxyServer = proxyServer;
+        serverSelector = proxyServer.getSelector();
+        isConfigured = true;
+        isWaitingDnsResponse = false;
     }
 
     public boolean isConfigured() {
@@ -58,7 +71,7 @@ public class ConnectionTunnel {
         return destServer;
     }
 
-    public void setClient(SocketChannel client) throws IOException {
+    public void setClient(SocketChannel client) {
         this.client = client;
     }
 
@@ -67,39 +80,27 @@ public class ConnectionTunnel {
     }
 
     //todo обратобка разного рода ошибок а также закрытия сокета
-
     public void setDestServer(AsyncDnsResolverAnswer answer) throws IOException {
-        if(isWaitingDnsResponse) {
+        if (isWaitingDnsResponse) {
             createDestServerSocket(getAsyncDnsResponse(answer));
         }
     }
 
-    public void configureConnection() throws IOException, ProxyServerException {
+    public void configureConnection() throws IOException {
         try {
             ByteBuffer recvBuffer = ByteBuffer.allocate(BufferSize);
             int read = client.read(recvBuffer);
             if (read == -1) {
-                System.out.println("remove: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort() );
+                System.out.println("remove: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort());
                 client.close();
                 client.keyFor(serverSelector).cancel();
+                proxyServer.removeConnection(this);
             }
-
-            System.out.println("RECV:");
-            for (int i = 0; i< read; i++){
-                System.out.print(recvBuffer.get(i) + " ");
-            }
-            System.out.println(" ");
 
             if (stepOfAuthentication == 0 & isCorrectFirstGreeting(recvBuffer)) {
                 ByteBuffer sendBuf = ByteBuffer.allocate(2);
-                System.out.println("SEND:");
-
                 sendBuf.put(0, (byte) 0x05);
                 sendBuf.put(1, (byte) 0x00);
-                for (int i = 0; i < 2; i++) {
-                    System.out.print(sendBuf.get(i) + " ");
-                }
-                System.out.println(" ");
                 client.write(sendBuf);
                 stepOfAuthentication++;
                 return;
@@ -117,26 +118,28 @@ public class ConnectionTunnel {
                         makeAsyncDnsRequest(recvBuffer);
                         return;
                     }
-                    default -> throw new ProxyServerException();
+                    default -> {
+                        return;
+                    }
                 }
 
                 createDestServerSocket(destAddr);
             }
+        } catch (IOException exception) {
+            System.out.println("can't make connection with client");
+            logger.error("can't make connection with client");
 
-
-        } catch (IOException | ProxyServerException exception) {
-            throw exception;
+            client.close();
+            client.keyFor(serverSelector).cancel();
+            proxyServer.removeConnection(this);
         }
     }
 
     private void createDestServerSocket(InetSocketAddress destAddr) throws IOException {
         destServer = SocketChannel.open();
+        destServer.socket().connect(destAddr);
         destServer.configureBlocking(false);
-        destServer.connect(destAddr);
         destServer.register(serverSelector, SelectionKey.OP_READ);
-
-        //this.destServerInputStream = new BufferedInputStream(destServer.socket().getInputStream());
-        //this.destServerOutputStream = new BufferedOutputStream(destServer.socket().getOutputStream());
 
         isConfigured = true;
         ByteBuffer sendBuffer = ByteBuffer.allocate(4 + destResource.getBytes().length + 2);
@@ -147,34 +150,44 @@ public class ConnectionTunnel {
         sendBuffer.put(4, destResource.getBytes());
         sendBuffer.putShort(4 + destResource.getBytes().length, (short) destPort);
         client.write(sendBuffer);
-        System.out.println("Connection success!");
+
+        System.out.println("Client: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort() + " connection to " + destServer.socket().getInetAddress().getHostName() + ":" + destPort + " success!");
+        logger.info("Client: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort() + " connection to " + destServer.socket().getInetAddress().getHostName() + ":" + destPort + " success!");
     }
 
-    public void resendData(SocketChannel socket) {
-        if (socket.equals(destServer))
-            sendToClient();
-        else
-            sendToDestServer();
-    }
-
-    private void sendToDestServer() {
+    public void resendData(SocketChannel socket) throws IOException {
+        ByteBuffer recvBuffer = ByteBuffer.allocate(BufferSize);
         try {
-            ByteBuffer recvBuffer = ByteBuffer.allocate(BufferSize);
-            int read = client.read(recvBuffer);
+            if (socket.equals(destServer)) {
+                int read = destServer.read(recvBuffer);
+                if (read == -1)
+                    throw new NotYetConnectedException();
 
-            destServer.write(recvBuffer);
+                ByteBuffer data = ByteBuffer.allocate(read);
+                System.arraycopy(recvBuffer.array(), 0, data.array(), 0, read);
+
+                client.write(data);
+                logger.info("resend " + read + " bytes, from " + destServer.socket().getInetAddress().getHostName() + ":" + destServer.socket().getPort() + " to " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort());
+
+            } else {
+                int read = client.read(recvBuffer);
+                if (read == -1)
+                    throw new NotYetConnectedException();
+
+                ByteBuffer data = ByteBuffer.allocate(read);
+                System.arraycopy(recvBuffer.array(), 0, data.array(), 0, read);
+
+                destServer.write(data);
+                logger.info("resend " + read + " bytes, from " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort() + " to " + destServer.socket().getInetAddress().getHostName() + ":" + destServer.socket().getPort());
+            }
         } catch (IOException | NotYetConnectedException exception) {
             System.out.println("client " + client.socket().getInetAddress().getHostName() + " close connection");
-        }
-    }
-
-    private void sendToClient() {
-        try {
-            ByteBuffer recvBuffer = ByteBuffer.allocate(BufferSize);
-            int read = destServer.read(recvBuffer);
-            client.write(recvBuffer);
-        } catch (IOException exception) {
-
+            System.out.println("remove: " + client.socket().getInetAddress().getHostName() + ":" + client.socket().getPort());
+            destServer.close();
+            client.close();
+            destServer.keyFor(serverSelector).channel();
+            client.keyFor(serverSelector).cancel();
+            proxyServer.removeConnection(this);
         }
     }
 
@@ -191,18 +204,21 @@ public class ConnectionTunnel {
         int urlLength = recvBuffer.get(4);
         ByteBuffer url = ByteBuffer.allocate(urlLength);
         System.arraycopy(recvBuffer.array(), 5, url.array(), 0, urlLength);
-        //ByteBuffer url = recvBuffer.slice(5, urlLength);
-        String str = new String(url.array());
+
+        System.out.println("REQUEST TO:" + new String(url.array()));
+
         destPort = recvBuffer.getShort(5 + urlLength);
-        isWaitingDnsResponse = true;
+        ByteBuffer destResourceBytes = ByteBuffer.allocate(recvBuffer.get(4) + 1);
+        System.arraycopy(recvBuffer.array(), 4, destResourceBytes.array(), 0, recvBuffer.get(4) + 1);
+        destResource = new String(destResourceBytes.array());
 
         dnsRequestId = dnsResolver.asyncResolveRequest(new String(url.array()));
+        isWaitingDnsResponse = true;
     }
 
     private InetSocketAddress getAsyncDnsResponse(AsyncDnsResolverAnswer answer) {
         isWaitingDnsResponse = false;
-        destResource = answer.ipAddress.get(0);
-        return new InetSocketAddress(destResource, destPort);
+        return new InetSocketAddress(answer.ipAddress.get(0), destPort);
     }
 
     private boolean isCorrectFirstGreeting(ByteBuffer recvBuffer) {
